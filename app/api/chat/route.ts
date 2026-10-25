@@ -1,94 +1,134 @@
 import { NextResponse } from 'next/server';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import fs from 'fs';
+import path from 'path';
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-});
+const apiKey = process.env.GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(apiKey || '');
 
-// Fallback hardcoded knowledge base to guarantee 100% working reliability
-const FALLBACK_KNOWLEDGE = `
---- SOURCE FILE: courses.md ---
-# Available Courses
-
-## Web Development
-Duration: 3 months.
-Topics: HTML, CSS, JavaScript, React, and Next.js.
-
-## Python Programming
-Duration: 2 months.
-Topics: Python basics, loops, functions, file handling, and projects.
-
-## Artificial Intelligence
-Duration: 4 months.
-Topics: AI fundamentals, machine learning basics, and AI-powered applications.
-
---- SOURCE FILE: fees.md ---
-# Course Fees
-
-## Web Development
-Course fee: ₹8,000.
-
-## Python Programming
-Course fee: ₹5,000.
-
-## Artificial Intelligence
-Course fee: ₹12,000.
-
---- SOURCE FILE: faqs.md ---
-# Frequently Asked Questions
-
-## How can I enroll?
-Contact the course administrator to learn about enrollment.
-
-## Do I need programming experience?
-No. The Python Programming course starts with the basics.
-
-## Are practical projects included?
-Yes. The courses include practical learning activities and projects.
-
-## Can I learn online?
-Online learning availability is not specified. Please contact the course administrator.
-`;
+// रॉ मार्कडाउन सिंबल्स (#, ##, **) को हटाने के लिए फंक्शन
+function cleanMarkdownText(text: string): string {
+  if (!text) return '';
+  return text
+    .replace(/^#+\s+/gm, '') 
+    .replace(/\*\*/g, '')     
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2'); 
+}
 
 export async function POST(req: Request) {
   try {
-    const { question } = await req.json();
-
-    if (!question || typeof question !== 'string') {
-      return NextResponse.json({ error: 'Invalid question provided.' }, { status: 400 });
+    if (!apiKey) {
+      return NextResponse.json({ 
+        reply: 'API key is missing in environment variables. Please check your .env.local file.' 
+      }, { status: 500 });
     }
 
-    // Using the guaranteed knowledge base content
-    const combinedKnowledge = FALLBACK_KNOWLEDGE;
-    const sourcesUsed = ['courses.md', 'fees.md', 'faqs.md'];
+    const { messages } = await req.json();
+    if (!messages || messages.length === 0) {
+      return NextResponse.json({ reply: 'No messages provided.' }, { status: 400 });
+    }
 
-    const systemInstruction = `You are "Knowledge Buddy", a helpful chatbot assistant for a website.
-1. If the user greets you (e.g., "hi", "hello", "hey"), reply politely and ask how you can help them regarding the available courses and fees.
-2. For all other questions, answer strictly using ONLY the provided Knowledge Base context below.
-3. If the requested answer is completely missing or not available in the Knowledge Base context, reply strictly with:
-"I'm sorry, but I couldn't find that information in my knowledge base. Please contact the course administrator for help."
-Do NOT invent or fabricate any details outside of the provided content.`;
+    const rawMessage = messages[messages.length - 1].content.trim();
+    const latestMessage = rawMessage.toLowerCase();
 
-    const prompt = `Knowledge Base Context:\n${combinedKnowledge}\n\nUser Question: ${question}`;
+    // 1. INSTANT GREETINGS CHECK
+    const greetings = ['hi', 'hello', 'hey', 'hii', 'hy', 'good morning', 'good afternoon', 'good evening', 'namaste', 'hey there'];
+    if (greetings.includes(latestMessage)) {
+      return NextResponse.json({
+        reply: "Hello! Welcome to QYBRENTHAK AI PRIVATE LIMITED. I am your official Customer Success Assistant. How can I assist you with our professional courses or platform services today?",
+        sources: []
+      });
+    }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: systemInstruction,
-        temperature: 0.2,
-      },
-    });
+    const kbDir = path.join(process.cwd(), 'app/knowledge-base');
+    
+    let kbFilesMap: { [key: string]: string } = {};
+    let fullKbContext = '';
+    let allSources: string[] = [];
 
-    const answer = response.text || "No response generated.";
+    if (fs.existsSync(kbDir)) {
+      const files = fs.readdirSync(kbDir);
+      for (const file of files) {
+        if (file.endsWith('.md')) {
+          const filePath = path.join(kbDir, file);
+          const rawContent = fs.readFileSync(filePath, 'utf-8');
+          kbFilesMap[file.toLowerCase()] = rawContent;
+          fullKbContext += `\n\n=== File: ${file} ===\n${rawContent}`;
+          allSources.push(file);
+        }
+      }
+    }
 
-    return NextResponse.json({ answer, sources: sourcesUsed });
+    // 2. ROBUST BUTTON MAPPING (सारे संभावित नामों को कवर किया गया है)
+    if (latestMessage.includes('course') || latestMessage.includes('available courses')) {
+      const courseKey = Object.keys(kbFilesMap).find(k => k.includes('course'));
+      if (courseKey) {
+        return NextResponse.json({
+          reply: cleanMarkdownText(kbFilesMap[courseKey]),
+          sources: [courseKey]
+        });
+      }
+    }
+
+    if (latestMessage.includes('admission') || latestMessage.includes('placement')) {
+      const admissionKey = Object.keys(kbFilesMap).find(k => k.includes('admission'));
+      if (admissionKey) {
+        return NextResponse.json({
+          reply: cleanMarkdownText(kbFilesMap[admissionKey]),
+          sources: [admissionKey]
+        });
+      }
+    }
+
+    if (latestMessage.includes('faq') || latestMessage.includes('frequently')) {
+      const faqKey = Object.keys(kbFilesMap).find(k => k.includes('faq'));
+      if (faqKey) {
+        return NextResponse.json({
+          reply: cleanMarkdownText(kbFilesMap[faqKey]),
+          sources: [faqKey]
+        });
+      }
+    }
+
+    // 3. AI MODEL CALL FOR CUSTOM SPECIFIC QUESTIONS
+    try {
+      const model = genAI.getGenerativeModel({ 
+        model: 'gemini-3.8-flash',
+        systemInstruction: `You are the official AI Customer Success Assistant for QYBRENTHAK AI PRIVATE LIMITED. 
+        Analyze the user's specific query carefully and extract ONLY the precise answer requested from the Knowledge Base below.
+        
+        STRICT RULES:
+        1. If the user asks about a specific course, fee, or topic, provide ONLY the relevant details for that specific item. Do not dump unrelated files.
+        2. Never output raw markdown symbols like hash (#) or bold asterisks (**). Output clean, readable plain conversational text.
+        
+        Knowledge Base:
+        ${fullKbContext}`,
+        generationConfig: {
+          maxOutputTokens: 300,
+          temperature: 0.1,
+        }
+      });
+
+      const result = await model.generateContent(rawMessage);
+      const responseText = cleanMarkdownText(result.response.text());
+
+      return NextResponse.json({ 
+        reply: responseText, 
+        sources: allSources 
+      });
+
+    } catch (aiError: any) {
+      console.warn('AI Model error:', aiError);
+      return NextResponse.json({ 
+        reply: "Welcome to QYBRENTHAK AI PRIVATE LIMITED. Please explore our available courses or ask any specific question.", 
+        sources: allSources 
+      });
+    }
 
   } catch (error: any) {
-    console.error('Gemini API Error:', error);
-    return NextResponse.json(
-      { error: error.message || 'An error occurred while communicating with Gemini.' },
-      { status: 500 }
-    );
+    console.error('API Error:', error);
+    return NextResponse.json({ 
+      reply: 'Hello! Welcome to QYBRENTHAK AI PRIVATE LIMITED. How can we assist you today?' 
+    }, { status: 200 });
   }
 }
